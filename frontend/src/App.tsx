@@ -4,22 +4,27 @@ const API_BASE = "http://localhost:8000";
 
 type JsonRecord = Record<string, unknown>;
 
-async function parseJsonSafe(res: Response): Promise<unknown> {
+async function fetchJsonWithStatus(url: string, init?: RequestInit): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const res = await fetch(url, init);
   const text = await res.text();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
   }
+  return { ok: res.ok, status: res.status, data };
 }
 
 export default function App() {
   const [health, setHealth] = useState<string>("Verification en cours...");
   const [simState, setSimState] = useState<unknown>(null);
-  const [diagnosis, setDiagnosis] = useState<unknown>(null);
-  const [paramKey, setParamKey] = useState<string>("ambient_temp");
-  const [paramValue, setParamValue] = useState<string>("32.5");
+  const [diagnosis, setDiagnosis] = useState<JsonRecord | null>(null);
+  const [dtValue, setDtValue] = useState<string>("1.0");
+  const [paramKey, setParamKey] = useState<string>("t_cond_c");
+  const [paramValue, setParamValue] = useState<string>("42.0");
   const [actionLog, setActionLog] = useState<string>("Pret pour le pilotage HVACR NEXUS.");
   const [busy, setBusy] = useState<boolean>(false);
 
@@ -27,24 +32,32 @@ export default function App() {
     setBusy(true);
     try {
       const [rootRes, stateRes, diagRes] = await Promise.allSettled([
-        fetch(`${API_BASE}/`),
-        fetch(`${API_BASE}/simulation/state`),
-        fetch(`${API_BASE}/simulation/diagnosis`),
+        fetchJsonWithStatus(`${API_BASE}/`),
+        fetchJsonWithStatus(`${API_BASE}/simulation/state`),
+        fetchJsonWithStatus(`${API_BASE}/simulation/diagnosis`),
       ]);
 
       if (rootRes.status === "fulfilled" && rootRes.value.ok) {
-        const rootData = (await parseJsonSafe(rootRes.value)) as JsonRecord | null;
-        setHealth(`${String(rootData?.service ?? "HVACR NEXUS")} : ${String(rootData?.status ?? "ok")}`);
+        const rootData = (rootRes.value.data ?? {}) as JsonRecord;
+        setHealth(`${String(rootData.service ?? "HVACR NEXUS")} : ${String(rootData.status ?? "ok")}`);
       } else {
         setHealth("API locale inaccessible sur http://localhost:8000");
       }
 
       if (stateRes.status === "fulfilled") {
-        setSimState(await parseJsonSafe(stateRes.value));
+        setSimState(
+          stateRes.value.ok
+            ? stateRes.value.data
+            : { http_status: stateRes.value.status, detail: stateRes.value.data }
+        );
       }
 
       if (diagRes.status === "fulfilled") {
-        setDiagnosis(await parseJsonSafe(diagRes.value));
+        setDiagnosis(
+          diagRes.value.ok && typeof diagRes.value.data === "object" && diagRes.value.data !== null
+            ? (diagRes.value.data as JsonRecord)
+            : { http_status: diagRes.value.status, detail: diagRes.value.data }
+        );
       }
 
       setActionLog("Etat et diagnostic synchronises avec le backend.");
@@ -57,20 +70,21 @@ export default function App() {
 
   async function handleStep() {
     setBusy(true);
-    try {
-      const res = await fetch(`${API_BASE}/simulation/step`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const data = await parseJsonSafe(res);
-      setSimState(data);
-      setActionLog(`POST /simulation/step -> HTTP ${res.status}`);
+    const parsedDt = Number(dtValue);
+    const safeDt = Number.isFinite(parsedDt) && parsedDt >= 0 ? parsedDt : 1.0;
 
-      const diagRes = await fetch(`${API_BASE}/simulation/diagnosis`);
-      if (diagRes.ok) {
-        setDiagnosis(await parseJsonSafe(diagRes));
+    try {
+      const stepRes = await fetchJsonWithStatus(`${API_BASE}/simulation/step?dt=${encodeURIComponent(String(safeDt))}`, {
+        method: "POST",
+      });
+      setSimState(stepRes.ok ? stepRes.data : { http_status: stepRes.status, detail: stepRes.data });
+
+      const diagRes = await fetchJsonWithStatus(`${API_BASE}/simulation/diagnosis`);
+      if (diagRes.ok && typeof diagRes.data === "object" && diagRes.data !== null) {
+        setDiagnosis(diagRes.data as JsonRecord);
       }
+
+      setActionLog(`POST /simulation/step?dt=${safeDt} -> HTTP ${stepRes.status}`);
     } catch (err) {
       setActionLog(`Erreur POST /simulation/step : ${String(err)}`);
     } finally {
@@ -81,29 +95,34 @@ export default function App() {
   async function handlePatchParams(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    const trimmedKey = paramKey.trim();
-    const numericVal = Number(paramValue);
-    const parsedVal: unknown =
-      paramValue.trim() === ""
-        ? ""
-        : !Number.isNaN(numericVal) && paramValue.trim() !== ""
-        ? numericVal
-        : paramValue;
-
-    const payload = trimmedKey ? { [trimmedKey]: parsedVal } : {};
+    const key = paramKey.trim();
+    const trimmedVal = paramValue.trim();
+    const numVal = Number(trimmedVal);
+    const val: unknown = trimmedVal !== "" && !Number.isNaN(numVal) ? numVal : trimmedVal;
+    const payload = key ? { [key]: val } : {};
 
     try {
-      const res = await fetch(`${API_BASE}/simulation/parameters`, {
+      const patchRes = await fetchJsonWithStatus(`${API_BASE}/simulation/parameters`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await parseJsonSafe(res);
-      setActionLog(`PATCH /simulation/parameters (${JSON.stringify(payload)}) -> HTTP ${res.status}`);
-      if (typeof data === "object" && data !== null) {
-        setSimState(data);
+
+      if (!patchRes.ok) {
+        setActionLog(`PATCH /simulation/parameters -> HTTP ${patchRes.status} (${JSON.stringify(patchRes.data)})`);
+        return;
       }
-      await refreshAll();
+
+      if (typeof patchRes.data === "object" && patchRes.data !== null) {
+        setSimState(patchRes.data);
+      }
+
+      const diagRes = await fetchJsonWithStatus(`${API_BASE}/simulation/diagnosis`);
+      if (diagRes.ok && typeof diagRes.data === "object" && diagRes.data !== null) {
+        setDiagnosis(diagRes.data as JsonRecord);
+      }
+
+      setActionLog(`PATCH /simulation/parameters (${JSON.stringify(payload)}) -> HTTP ${patchRes.status}`);
     } catch (err) {
       setActionLog(`Erreur PATCH /simulation/parameters : ${String(err)}`);
     } finally {
@@ -183,6 +202,23 @@ export default function App() {
           Actualiser State &amp; Diagnosis
         </button>
 
+        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem" }}>
+          <span>dt:</span>
+          <input
+            type="text"
+            value={dtValue}
+            onChange={(e) => setDtValue(e.target.value)}
+            style={{
+              backgroundColor: "#0A2E3F",
+              color: "#E6F7FF",
+              border: "1px solid #11606B",
+              padding: "0.55rem 0.6rem",
+              borderRadius: "0.4rem",
+              width: "68px",
+            }}
+          />
+        </label>
+
         <button
           type="button"
           disabled={busy}
@@ -205,27 +241,28 @@ export default function App() {
             type="text"
             value={paramKey}
             onChange={(e) => setParamKey(e.target.value)}
-            placeholder="Parametre (ex: ambient_temp)"
+            placeholder="t_cond_c / superheat_k / subcooling_k"
             style={{
               backgroundColor: "#0A2E3F",
               color: "#E6F7FF",
               border: "1px solid #11606B",
               padding: "0.55rem 0.75rem",
               borderRadius: "0.4rem",
+              width: "180px",
             }}
           />
           <input
             type="text"
             value={paramValue}
             onChange={(e) => setParamValue(e.target.value)}
-            placeholder="Valeur (ex: 32.5)"
+            placeholder="Valeur"
             style={{
               backgroundColor: "#0A2E3F",
               color: "#E6F7FF",
               border: "1px solid #11606B",
               padding: "0.55rem 0.75rem",
               borderRadius: "0.4rem",
-              width: "120px",
+              width: "100px",
             }}
           />
           <button
@@ -301,6 +338,21 @@ export default function App() {
           <h2 style={{ color: "#CE701A", fontSize: "1.1rem", marginTop: 0 }}>
             GET /simulation/diagnosis
           </h2>
+          {diagnosis && "health_score" in diagnosis && (
+            <div
+              style={{
+                display: "flex",
+                gap: "1rem",
+                marginBottom: "0.75rem",
+                fontSize: "0.9rem",
+                color: "#28EBFF",
+                fontWeight: 600,
+              }}
+            >
+              <span>Score : {String(diagnosis.health_score ?? "-")}</span>
+              <span>Statut : {String(diagnosis.overall_status ?? "-")}</span>
+            </div>
+          )}
           <pre
             style={{
               margin: 0,
