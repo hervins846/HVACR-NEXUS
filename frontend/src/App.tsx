@@ -99,7 +99,20 @@ export default function App() {
       health_score: nextDiag?.health_score ?? "--",
       overall_status: nextDiag?.overall_status ?? "INCONNU",
     };
-    setHistory((prev) => [entry, ...prev].slice(0, 12));
+    setHistory((prev) => {
+      const top = prev[0];
+      if (
+        top &&
+        top.step === entry.step &&
+        top.sim_time_s === entry.sim_time_s &&
+        String(top.cop) === String(entry.cop) &&
+        String(top.health_score) === String(entry.health_score) &&
+        top.overall_status === entry.overall_status
+      ) {
+        return prev;
+      }
+      return [entry, ...prev].slice(0, 15);
+    });
   }
 
   async function syncAll(message = "Etat et diagnostic synchronises avec le backend.") {
@@ -348,7 +361,7 @@ export default function App() {
 
         <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "10px", padding: "16px", marginBottom: "18px" }}>
           <h2 style={{ marginTop: 0, marginBottom: "10px", color: "#28ebff", fontSize: "18px" }}>
-            Historique Recent (12 derniers relevés)
+            Historique Recent (15 derniers relevés uniques)
           </h2>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
