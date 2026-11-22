@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from typing import Any
+
 from app.diagnostics.fault_classifier import classify_triggered_rules
 from app.diagnostics.recommendation import build_recommendations
 from app.diagnostics.rule_engine import RuleEngine
@@ -13,6 +15,16 @@ class DiagnosisReport:
     triggered_rules: list[dict]
     classified_faults: list[dict]
     recommendations: list[dict]
+
+
+def _to_dict(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return item
+    if is_dataclass(item) and not isinstance(item, type):
+        return asdict(item)
+    if hasattr(item, "__dict__"):
+        return dict(vars(item))
+    return {"value": item}
 
 
 class SystemDiagnostician:
@@ -46,7 +58,7 @@ class SystemDiagnostician:
         return DiagnosisReport(
             health_score=health_score,
             overall_status=overall_status,
-            triggered_rules=triggered,
-            classified_faults=[asdict(f) for f in classified],
-            recommendations=[asdict(r) for r in recommendations],
+            triggered_rules=[_to_dict(t) for t in triggered],
+            classified_faults=[_to_dict(f) for f in classified],
+            recommendations=[_to_dict(r) for r in recommendations],
         )
