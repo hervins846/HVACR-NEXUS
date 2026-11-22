@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,7 +8,7 @@ from app.core.logging import logger
 
 app = FastAPI(
     title="HVACR NEXUS API",
-    description="Digital Twin Engineering Lab — Thermodynamic Simulation, Controls & Diagnostics",
+    description="Digital Twin Engineering Lab - Thermodynamic Simulation, Controls & Diagnostics",
     version="1.0.0",
 )
 
