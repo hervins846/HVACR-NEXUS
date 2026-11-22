@@ -69,6 +69,8 @@ const SCENARIOS: ScenarioPreset[] = [
   },
 ];
 
+const NODE_ORDER = ["exp_out", "evap_out", "comp_out", "cond_out"];
+
 export default function App() {
   const [backendOk, setBackendOk] = useState<string>("Verification...");
   const [banner, setBanner] = useState<string>("Pret.");
@@ -144,7 +146,34 @@ export default function App() {
   const perf = stateData?.cycle?.performance;
   const points = stateData?.cycle?.points ?? [];
   const status = diagData?.overall_status ?? "INCONNU";
-  const score = diagData?.health_score ?? "--";
+  const rawScore = typeof diagData?.health_score === "number" ? diagData.health_score : 0;
+  const clampedScore = Math.max(0, Math.min(100, rawScore));
+  const statusColor =
+    status === "CRITICAL" ? "#ff6b6b" : status === "DEGRADED" ? "#ffb84d" : "#4ce89b";
+
+  const pointMap = new Map<string, CyclePoint>();
+  for (const pt of points) {
+    pointMap.set(pt.name, pt);
+  }
+
+  const orderedPoints = NODE_ORDER.map((name) =>
+    pointMap.get(name) ?? { name, t_c: 0, p_bar: 0 }
+  );
+
+  // Coordonnees SVG (4 sommets du cycle : exp_out -> evap_out -> comp_out -> cond_out)
+  const coords: Record<string, { x: number; y: number }> = {
+    exp_out: { x: 110, y: 170 },
+    evap_out: { x: 260, y: 170 },
+    comp_out: { x: 430, y: 55 },
+    cond_out: { x: 250, y: 55 },
+  };
+
+  const polygonPoints = orderedPoints
+    .map((pt) => {
+      const c = coords[pt.name] ?? { x: 150, y: 110 };
+      return `${c.x},${c.y}`;
+    })
+    .join(" ");
 
   return (
     <div style={{ minHeight: "100vh", background: "#03131b", color: "#e6f7ff", padding: "24px", fontFamily: "system-ui, sans-serif" }}>
@@ -218,6 +247,19 @@ export default function App() {
             </div>
           </div>
 
+          <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "8px", padding: "12px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", color: "#8cb8c9" }}>
+              <span>Sante Systeme</span>
+              <span style={{ color: statusColor, fontWeight: 700 }}>{status}</span>
+            </div>
+            <div style={{ fontSize: "20px", fontWeight: 700, color: statusColor, marginTop: "4px" }}>
+              {diagData?.health_score ?? "--"} / 100
+            </div>
+            <div style={{ height: "8px", background: "#0c3242", borderRadius: "999px", overflow: "hidden", marginTop: "8px" }}>
+              <div style={{ width: `${clampedScore}%`, height: "100%", background: statusColor, transition: "width 0.25s ease" }} />
+            </div>
+          </div>
+
           {points.map((pt) => (
             <div key={pt.name} style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "8px", padding: "12px" }}>
               <div style={{ fontSize: "12px", color: "#ce701a", fontWeight: 700 }}>{pt.name}</div>
@@ -231,6 +273,40 @@ export default function App() {
           ))}
         </div>
 
+        <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "10px", padding: "16px", marginBottom: "18px" }}>
+          <h2 style={{ marginTop: 0, marginBottom: "10px", color: "#28ebff", fontSize: "18px" }}>
+            Boucle Thermodynamique (exp_out -&gt; evap_out -&gt; comp_out -&gt; cond_out)
+          </h2>
+          <svg viewBox="0 0 540 225" style={{ width: "100%", maxHeight: "240px", background: "#041822", borderRadius: "8px" }}>
+            <polygon
+              points={polygonPoints}
+              fill="rgba(40, 235, 255, 0.08)"
+              stroke="#28ebff"
+              strokeWidth="2.5"
+            />
+            {orderedPoints.map((pt) => {
+              const c = coords[pt.name] ?? { x: 150, y: 110 };
+              const isUpper = pt.name === "comp_out" || pt.name === "cond_out";
+              const labelY = isUpper ? c.y - 26 : c.y + 18;
+              return (
+                <g key={pt.name}>
+                  <circle cx={c.x} cy={c.y} r="7" fill="#ce701a" stroke="#e6f7ff" strokeWidth="2" />
+                  <text
+                    x={c.x}
+                    y={labelY}
+                    textAnchor="middle"
+                    fill="#e6f7ff"
+                    fontSize="12"
+                    fontWeight="700"
+                  >
+                    {pt.name} : {pt.t_c} °C / {pt.p_bar} bar
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(460px, 1fr))", gap: "18px" }}>
           <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "10px", padding: "16px" }}>
             <h2 style={{ marginTop: 0, color: "#28ebff", fontSize: "18px" }}>GET /simulation/state</h2>
@@ -241,8 +317,8 @@ export default function App() {
 
           <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "10px", padding: "16px" }}>
             <h2 style={{ marginTop: 0, color: "#ce701a", fontSize: "18px" }}>GET /simulation/diagnosis</h2>
-            <div style={{ marginBottom: "10px", fontWeight: 700, color: status === "CRITICAL" ? "#ff6b6b" : status === "DEGRADED" ? "#ffb84d" : "#4ce89b" }}>
-              Score : {score} &nbsp; Statut : {status}
+            <div style={{ marginBottom: "10px", fontWeight: 700, color: statusColor }}>
+              Score : {diagData?.health_score ?? "--"} &nbsp; Statut : {status}
             </div>
             <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "13px", lineHeight: 1.45 }}>
               {JSON.stringify(diagData, null, 2)}
