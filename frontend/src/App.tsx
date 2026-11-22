@@ -40,6 +40,14 @@ type DiagnosisPayload = {
   recommendations?: Array<Record<string, unknown>>;
 };
 
+type HistoryEntry = {
+  step: number;
+  sim_time_s: number;
+  cop: number | string;
+  health_score: number | string;
+  overall_status: string;
+};
+
 type ScenarioPreset = {
   id: string;
   label: string;
@@ -80,6 +88,19 @@ export default function App() {
   const [selectedScenario, setSelectedScenario] = useState<string>("nominal");
   const [stateData, setStateData] = useState<SimulationState | null>(null);
   const [diagData, setDiagData] = useState<DiagnosisPayload | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+
+  function recordHistory(nextState: SimulationState | null, nextDiag: DiagnosisPayload | null) {
+    if (!nextState) return;
+    const entry: HistoryEntry = {
+      step: Number(nextState.step ?? 0),
+      sim_time_s: Number(nextState.sim_time_s ?? 0),
+      cop: nextState.cycle?.performance?.cop ?? "--",
+      health_score: nextDiag?.health_score ?? "--",
+      overall_status: nextDiag?.overall_status ?? "INCONNU",
+    };
+    setHistory((prev) => [entry, ...prev].slice(0, 12));
+  }
 
   async function syncAll(message = "Etat et diagnostic synchronises avec le backend.") {
     try {
@@ -94,12 +115,11 @@ export default function App() {
       } else {
         setBackendOk(`Erreur HTTP ${rootRes.status}`);
       }
-      if (stateRes.ok) {
-        setStateData(await stateRes.json());
-      }
-      if (diagRes.ok) {
-        setDiagData(await diagRes.json());
-      }
+      const nextState: SimulationState | null = stateRes.ok ? await stateRes.json() : null;
+      const nextDiag: DiagnosisPayload | null = diagRes.ok ? await diagRes.json() : null;
+      if (nextState) setStateData(nextState);
+      if (nextDiag) setDiagData(nextDiag);
+      recordHistory(nextState, nextDiag);
       setBanner(message);
     } catch (err) {
       setBackendOk("Hors ligne");
@@ -139,6 +159,22 @@ export default function App() {
     await syncAll(`Scenario applique : ${preset.label}.`);
   }
 
+  function handleExportJson() {
+    const payload = JSON.stringify(
+      { exported_at: new Date().toISOString(), state: stateData, diagnosis: diagData, history },
+      null,
+      2
+    );
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "hvacr-nexus-snapshot.json";
+    a.click();
+    URL.revokeObjectURL(url);
+    setBanner("Export JSON telecharge (hvacr-nexus-snapshot.json).");
+  }
+
   useEffect(() => {
     syncAll();
   }, []);
@@ -160,7 +196,6 @@ export default function App() {
     pointMap.get(name) ?? { name, t_c: 0, p_bar: 0 }
   );
 
-  // Coordonnees SVG (4 sommets du cycle : exp_out -> evap_out -> comp_out -> cond_out)
   const coords: Record<string, { x: number; y: number }> = {
     exp_out: { x: 110, y: 170 },
     evap_out: { x: 260, y: 170 },
@@ -230,6 +265,10 @@ export default function App() {
               </option>
             ))}
           </select>
+
+          <button onClick={handleExportJson} style={{ background: "#163f4e", color: "#28ebff", border: "1px solid #28ebff", padding: "9px 14px", borderRadius: "6px", cursor: "pointer", fontWeight: 600 }}>
+            Exporter JSON
+          </button>
         </div>
 
         <div style={{ background: "#06212e", border: "1px solid #124859", borderRadius: "8px", padding: "12px 16px", marginBottom: "18px", color: "#bfe8f7" }}>
@@ -305,6 +344,36 @@ export default function App() {
               );
             })}
           </svg>
+        </div>
+
+        <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "10px", padding: "16px", marginBottom: "18px" }}>
+          <h2 style={{ marginTop: 0, marginBottom: "10px", color: "#28ebff", fontSize: "18px" }}>
+            Historique Recent (12 derniers relevés)
+          </h2>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid #164e63", color: "#8cb8c9", textAlign: "left" }}>
+                  <th style={{ padding: "8px" }}>Step</th>
+                  <th style={{ padding: "8px" }}>Temps (s)</th>
+                  <th style={{ padding: "8px" }}>COP</th>
+                  <th style={{ padding: "8px" }}>Score</th>
+                  <th style={{ padding: "8px" }}>Statut</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((h, idx) => (
+                  <tr key={`${h.step}-${idx}`} style={{ borderBottom: "1px solid #0c2e3d" }}>
+                    <td style={{ padding: "8px" }}>{h.step}</td>
+                    <td style={{ padding: "8px" }}>{h.sim_time_s}</td>
+                    <td style={{ padding: "8px", color: "#28ebff", fontWeight: 600 }}>{h.cop}</td>
+                    <td style={{ padding: "8px" }}>{h.health_score}</td>
+                    <td style={{ padding: "8px", fontWeight: 700 }}>{h.overall_status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(460px, 1fr))", gap: "18px" }}>
