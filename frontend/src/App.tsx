@@ -2,368 +2,252 @@ import { useEffect, useState } from "react";
 
 const API_BASE = "http://localhost:8000";
 
-type JsonRecord = Record<string, unknown>;
+type CyclePoint = {
+  name: string;
+  t_c: number;
+  p_bar: number;
+};
 
-async function fetchJsonWithStatus(url: string, init?: RequestInit): Promise<{ ok: boolean; status: number; data: unknown }> {
-  const res = await fetch(url, init);
-  const text = await res.text();
-  let data: unknown = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text };
-    }
-  }
-  return { ok: res.ok, status: res.status, data };
-}
+type SimulationState = {
+  running?: boolean;
+  step?: number;
+  sim_time_s?: number;
+  inputs?: {
+    fluid?: string;
+    t_evap_c?: number;
+    t_cond_c?: number;
+    superheat_k?: number;
+    subcooling_k?: number;
+    eta_isentropic?: number;
+    mass_flow_kg_s?: number;
+  };
+  cycle?: {
+    performance?: {
+      cop?: number;
+      cooling_capacity_kw?: number;
+      compressor_power_kw?: number;
+    };
+    points?: CyclePoint[];
+  };
+  last_input?: Record<string, unknown>;
+};
+
+type DiagnosisPayload = {
+  health_score?: number;
+  overall_status?: string;
+  triggered_rules?: Array<Record<string, unknown>>;
+  classified_faults?: Array<Record<string, unknown>>;
+  recommendations?: Array<Record<string, unknown>>;
+};
+
+type ScenarioPreset = {
+  id: string;
+  label: string;
+  params: Record<string, number>;
+};
+
+const SCENARIOS: ScenarioPreset[] = [
+  {
+    id: "nominal",
+    label: "Nominal (R410A)",
+    params: { t_evap_c: 5.0, t_cond_c: 40.0, superheat_k: 5.0, subcooling_k: 4.0 },
+  },
+  {
+    id: "high_cond",
+    label: "Encrassement Condenseur (75 C)",
+    params: { t_cond_c: 75.0, superheat_k: 5.0, subcooling_k: 4.0 },
+  },
+  {
+    id: "low_sh",
+    label: "Coup de Liquide (SH 1.2 K)",
+    params: { t_cond_c: 40.0, superheat_k: 1.2, subcooling_k: 4.0 },
+  },
+  {
+    id: "leak",
+    label: "Fuite Fluide (SH 12 K / SC 1 K)",
+    params: { t_cond_c: 40.0, superheat_k: 12.0, subcooling_k: 1.0 },
+  },
+];
 
 export default function App() {
-  const [health, setHealth] = useState<string>("Verification en cours...");
-  const [simState, setSimState] = useState<unknown>(null);
-  const [diagnosis, setDiagnosis] = useState<JsonRecord | null>(null);
-  const [dtValue, setDtValue] = useState<string>("1.0");
-  const [paramKey, setParamKey] = useState<string>("t_cond_c");
+  const [backendOk, setBackendOk] = useState<string>("Verification...");
+  const [banner, setBanner] = useState<string>("Pret.");
+  const [dt, setDt] = useState<string>("1.0");
+  const [paramName, setParamName] = useState<string>("t_cond_c");
   const [paramValue, setParamValue] = useState<string>("42.0");
-  const [actionLog, setActionLog] = useState<string>("Pret pour le pilotage HVACR NEXUS.");
-  const [busy, setBusy] = useState<boolean>(false);
+  const [selectedScenario, setSelectedScenario] = useState<string>("nominal");
+  const [stateData, setStateData] = useState<SimulationState | null>(null);
+  const [diagData, setDiagData] = useState<DiagnosisPayload | null>(null);
 
-  async function refreshAll() {
-    setBusy(true);
+  async function syncAll(message = "Etat et diagnostic synchronises avec le backend.") {
     try {
-      const [rootRes, stateRes, diagRes] = await Promise.allSettled([
-        fetchJsonWithStatus(`${API_BASE}/`),
-        fetchJsonWithStatus(`${API_BASE}/simulation/state`),
-        fetchJsonWithStatus(`${API_BASE}/simulation/diagnosis`),
+      const [rootRes, stateRes, diagRes] = await Promise.all([
+        fetch(`${API_BASE}/`),
+        fetch(`${API_BASE}/simulation/state`),
+        fetch(`${API_BASE}/simulation/diagnosis`),
       ]);
-
-      if (rootRes.status === "fulfilled" && rootRes.value.ok) {
-        const rootData = (rootRes.value.data ?? {}) as JsonRecord;
-        setHealth(`${String(rootData.service ?? "HVACR NEXUS")} : ${String(rootData.status ?? "ok")}`);
+      if (rootRes.ok) {
+        const rootJson = await rootRes.json();
+        setBackendOk(`${rootJson.service ?? "HVACR NEXUS"} : ${rootJson.status ?? "ok"}`);
       } else {
-        setHealth("API locale inaccessible sur http://localhost:8000");
+        setBackendOk(`Erreur HTTP ${rootRes.status}`);
       }
-
-      if (stateRes.status === "fulfilled") {
-        setSimState(
-          stateRes.value.ok
-            ? stateRes.value.data
-            : { http_status: stateRes.value.status, detail: stateRes.value.data }
-        );
+      if (stateRes.ok) {
+        setStateData(await stateRes.json());
       }
-
-      if (diagRes.status === "fulfilled") {
-        setDiagnosis(
-          diagRes.value.ok && typeof diagRes.value.data === "object" && diagRes.value.data !== null
-            ? (diagRes.value.data as JsonRecord)
-            : { http_status: diagRes.value.status, detail: diagRes.value.data }
-        );
+      if (diagRes.ok) {
+        setDiagData(await diagRes.json());
       }
-
-      setActionLog("Etat et diagnostic synchronises avec le backend.");
+      setBanner(message);
     } catch (err) {
-      setActionLog(`Erreur de synchronisation : ${String(err)}`);
-    } finally {
-      setBusy(false);
+      setBackendOk("Hors ligne");
+      setBanner(`Erreur de synchronisation : ${String(err)}`);
     }
   }
 
   async function handleStep() {
-    setBusy(true);
-    const parsedDt = Number(dtValue);
+    const parsedDt = Number(dt);
     const safeDt = Number.isFinite(parsedDt) && parsedDt >= 0 ? parsedDt : 1.0;
-
-    try {
-      const stepRes = await fetchJsonWithStatus(`${API_BASE}/simulation/step?dt=${encodeURIComponent(String(safeDt))}`, {
-        method: "POST",
-      });
-      setSimState(stepRes.ok ? stepRes.data : { http_status: stepRes.status, detail: stepRes.data });
-
-      const diagRes = await fetchJsonWithStatus(`${API_BASE}/simulation/diagnosis`);
-      if (diagRes.ok && typeof diagRes.data === "object" && diagRes.data !== null) {
-        setDiagnosis(diagRes.data as JsonRecord);
-      }
-
-      setActionLog(`POST /simulation/step?dt=${safeDt} -> HTTP ${stepRes.status}`);
-    } catch (err) {
-      setActionLog(`Erreur POST /simulation/step : ${String(err)}`);
-    } finally {
-      setBusy(false);
-    }
+    await fetch(`${API_BASE}/simulation/step?dt=${encodeURIComponent(String(safeDt))}`, {
+      method: "POST",
+    });
+    await syncAll(`Pas de simulation execute (dt = ${safeDt} s).`);
   }
 
-  async function handlePatchParams(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    const key = paramKey.trim();
-    const trimmedVal = paramValue.trim();
-    const numVal = Number(trimmedVal);
-    const val: unknown = trimmedVal !== "" && !Number.isNaN(numVal) ? numVal : trimmedVal;
-    const payload = key ? { [key]: val } : {};
+  async function handlePatchSingle() {
+    const numVal = Number(paramValue);
+    if (!paramName.trim() || !Number.isFinite(numVal)) return;
+    await fetch(`${API_BASE}/simulation/parameters`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [paramName.trim()]: numVal }),
+    });
+    await syncAll(`Parametre ${paramName.trim()} mis a jour (${numVal}).`);
+  }
 
-    try {
-      const patchRes = await fetchJsonWithStatus(`${API_BASE}/simulation/parameters`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!patchRes.ok) {
-        setActionLog(`PATCH /simulation/parameters -> HTTP ${patchRes.status} (${JSON.stringify(patchRes.data)})`);
-        return;
-      }
-
-      if (typeof patchRes.data === "object" && patchRes.data !== null) {
-        setSimState(patchRes.data);
-      }
-
-      const diagRes = await fetchJsonWithStatus(`${API_BASE}/simulation/diagnosis`);
-      if (diagRes.ok && typeof diagRes.data === "object" && diagRes.data !== null) {
-        setDiagnosis(diagRes.data as JsonRecord);
-      }
-
-      setActionLog(`PATCH /simulation/parameters (${JSON.stringify(payload)}) -> HTTP ${patchRes.status}`);
-    } catch (err) {
-      setActionLog(`Erreur PATCH /simulation/parameters : ${String(err)}`);
-    } finally {
-      setBusy(false);
-    }
+  async function handleApplyScenario(scenarioId: string) {
+    setSelectedScenario(scenarioId);
+    const preset = SCENARIOS.find((s) => s.id === scenarioId);
+    if (!preset) return;
+    await fetch(`${API_BASE}/simulation/parameters`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(preset.params),
+    });
+    await syncAll(`Scenario applique : ${preset.label}.`);
   }
 
   useEffect(() => {
-    refreshAll();
+    syncAll();
   }, []);
 
+  const perf = stateData?.cycle?.performance;
+  const points = stateData?.cycle?.points ?? [];
+  const status = diagData?.overall_status ?? "INCONNU";
+  const score = diagData?.health_score ?? "--";
+
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        backgroundColor: "#06212E",
-        color: "#E6F7FF",
-        padding: "2rem",
-        fontFamily: "system-ui, -apple-system, sans-serif",
-      }}
-    >
-      <header
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: "1rem",
-          borderBottom: "1px solid #11606B",
-          paddingBottom: "1rem",
-          marginBottom: "1.5rem",
-        }}
-      >
-        <div>
-          <h1 style={{ color: "#28EBFF", fontSize: "2rem", margin: 0 }}>HVACR NEXUS</h1>
-          <p style={{ margin: "0.35rem 0 0", color: "#9AD8E6" }}>
-            Digital Twin Lab — Frontend <strong>http://localhost:5173/</strong> &lt;-&gt; API{" "}
-            <strong>http://localhost:8000</strong>
-          </p>
+    <div style={{ minHeight: "100vh", background: "#03131b", color: "#e6f7ff", padding: "24px", fontFamily: "system-ui, sans-serif" }}>
+      <div style={{ maxWidth: "1360px", margin: "0 auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px", marginBottom: "16px" }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: "32px", color: "#28ebff" }}>HVACR NEXUS</h1>
+            <div style={{ color: "#9ec2d4", fontSize: "14px" }}>
+              Digital Twin Lab — Frontend http://localhost:5173/ &lt;-&gt; API http://localhost:8000
+            </div>
+          </div>
+          <div style={{ background: "#083c47", color: "#4ce89b", padding: "10px 16px", borderRadius: "8px", fontWeight: 700 }}>
+            Backend : {backendOk}
+          </div>
         </div>
-        <div
-          style={{
-            backgroundColor: "#11606B",
-            padding: "0.55rem 1rem",
-            borderRadius: "0.5rem",
-            color: "#CE701A",
-            fontWeight: 700,
-          }}
-        >
-          Backend : {health}
-        </div>
-      </header>
 
-      <section
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: "0.75rem",
-          alignItems: "center",
-          marginBottom: "1.5rem",
-        }}
-      >
-        <button
-          type="button"
-          disabled={busy}
-          onClick={refreshAll}
-          style={{
-            backgroundColor: "#11606B",
-            color: "#E6F7FF",
-            border: "1px solid #28EBFF",
-            padding: "0.6rem 1rem",
-            borderRadius: "0.4rem",
-            cursor: "pointer",
-            fontWeight: 600,
-          }}
-        >
-          Actualiser State &amp; Diagnosis
-        </button>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", alignItems: "center", marginBottom: "14px" }}>
+          <button onClick={() => syncAll()} style={{ background: "#0b6e7a", color: "#fff", border: "none", padding: "10px 14px", borderRadius: "6px", cursor: "pointer", fontWeight: 600 }}>
+            Actualiser State &amp; Diagnosis
+          </button>
 
-        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem" }}>
-          <span>dt:</span>
+          <label style={{ fontSize: "13px", color: "#9ec2d4" }}>dt:</label>
           <input
-            type="text"
-            value={dtValue}
-            onChange={(e) => setDtValue(e.target.value)}
-            style={{
-              backgroundColor: "#0A2E3F",
-              color: "#E6F7FF",
-              border: "1px solid #11606B",
-              padding: "0.55rem 0.6rem",
-              borderRadius: "0.4rem",
-              width: "68px",
-            }}
+            value={dt}
+            onChange={(e) => setDt(e.target.value)}
+            style={{ width: "68px", padding: "9px", borderRadius: "6px", border: "1px solid #1b4b5c", background: "#07222e", color: "#fff" }}
           />
-        </label>
+          <button onClick={handleStep} style={{ background: "#14b8e6", color: "#03131b", border: "none", padding: "10px 14px", borderRadius: "6px", cursor: "pointer", fontWeight: 700 }}>
+            Executer 1 Pas (POST /simulation/step)
+          </button>
 
-        <button
-          type="button"
-          disabled={busy}
-          onClick={handleStep}
-          style={{
-            backgroundColor: "#28EBFF",
-            color: "#06212E",
-            border: "none",
-            padding: "0.6rem 1.1rem",
-            borderRadius: "0.4rem",
-            cursor: "pointer",
-            fontWeight: 700,
-          }}
-        >
-          Executer 1 Pas (POST /simulation/step)
-        </button>
-
-        <form onSubmit={handlePatchParams} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
           <input
-            type="text"
-            value={paramKey}
-            onChange={(e) => setParamKey(e.target.value)}
-            placeholder="t_cond_c / superheat_k / subcooling_k"
-            style={{
-              backgroundColor: "#0A2E3F",
-              color: "#E6F7FF",
-              border: "1px solid #11606B",
-              padding: "0.55rem 0.75rem",
-              borderRadius: "0.4rem",
-              width: "180px",
-            }}
+            value={paramName}
+            onChange={(e) => setParamName(e.target.value)}
+            style={{ width: "130px", padding: "9px", borderRadius: "6px", border: "1px solid #1b4b5c", background: "#07222e", color: "#fff" }}
           />
           <input
-            type="text"
             value={paramValue}
             onChange={(e) => setParamValue(e.target.value)}
-            placeholder="Valeur"
-            style={{
-              backgroundColor: "#0A2E3F",
-              color: "#E6F7FF",
-              border: "1px solid #11606B",
-              padding: "0.55rem 0.75rem",
-              borderRadius: "0.4rem",
-              width: "100px",
-            }}
+            style={{ width: "86px", padding: "9px", borderRadius: "6px", border: "1px solid #1b4b5c", background: "#07222e", color: "#fff" }}
           />
-          <button
-            type="submit"
-            disabled={busy}
-            style={{
-              backgroundColor: "#CE701A",
-              color: "#06212E",
-              border: "none",
-              padding: "0.6rem 1rem",
-              borderRadius: "0.4rem",
-              cursor: "pointer",
-              fontWeight: 700,
-            }}
-          >
+          <button onClick={handlePatchSingle} style={{ background: "#ce701a", color: "#fff", border: "none", padding: "10px 14px", borderRadius: "6px", cursor: "pointer", fontWeight: 700 }}>
             PATCH Parameters
           </button>
-        </form>
-      </section>
 
-      <p
-        style={{
-          backgroundColor: "#0A2E3F",
-          borderLeft: "4px solid #28EBFF",
-          padding: "0.65rem 0.9rem",
-          borderRadius: "0.25rem",
-          marginBottom: "1.5rem",
-          fontSize: "0.95rem",
-        }}
-      >
-        {actionLog}
-      </p>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-          gap: "1.25rem",
-        }}
-      >
-        <div
-          style={{
-            backgroundColor: "#0A2E3F",
-            border: "1px solid #11606B",
-            borderRadius: "0.5rem",
-            padding: "1rem",
-          }}
-        >
-          <h2 style={{ color: "#28EBFF", fontSize: "1.1rem", marginTop: 0 }}>
-            GET /simulation/state
-          </h2>
-          <pre
-            style={{
-              margin: 0,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              fontSize: "0.85rem",
-              color: "#D8F3FA",
-            }}
+          <select
+            value={selectedScenario}
+            onChange={(e) => handleApplyScenario(e.target.value)}
+            style={{ padding: "9px 12px", borderRadius: "6px", border: "1px solid #28ebff", background: "#07222e", color: "#e6f7ff", fontWeight: 600 }}
           >
-            {JSON.stringify(simState, null, 2)}
-          </pre>
+            {SCENARIOS.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
         </div>
 
-        <div
-          style={{
-            backgroundColor: "#0A2E3F",
-            border: "1px solid #11606B",
-            borderRadius: "0.5rem",
-            padding: "1rem",
-          }}
-        >
-          <h2 style={{ color: "#CE701A", fontSize: "1.1rem", marginTop: 0 }}>
-            GET /simulation/diagnosis
-          </h2>
-          {diagnosis && "health_score" in diagnosis && (
-            <div
-              style={{
-                display: "flex",
-                gap: "1rem",
-                marginBottom: "0.75rem",
-                fontSize: "0.9rem",
-                color: "#28EBFF",
-                fontWeight: 600,
-              }}
-            >
-              <span>Score : {String(diagnosis.health_score ?? "-")}</span>
-              <span>Statut : {String(diagnosis.overall_status ?? "-")}</span>
+        <div style={{ background: "#06212e", border: "1px solid #124859", borderRadius: "8px", padding: "12px 16px", marginBottom: "18px", color: "#bfe8f7" }}>
+          {banner}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "12px", marginBottom: "18px" }}>
+          <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "8px", padding: "12px" }}>
+            <div style={{ fontSize: "12px", color: "#8cb8c9" }}>COP / Puissances</div>
+            <div style={{ fontSize: "20px", fontWeight: 700, color: "#28ebff", marginTop: "4px" }}>
+              COP {perf?.cop ?? "--"}
             </div>
-          )}
-          <pre
-            style={{
-              margin: 0,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              fontSize: "0.85rem",
-              color: "#D8F3FA",
-            }}
-          >
-            {JSON.stringify(diagnosis, null, 2)}
-          </pre>
+            <div style={{ fontSize: "13px", color: "#cce9f4", marginTop: "4px" }}>
+              Froid : {perf?.cooling_capacity_kw ?? "--"} kW | Comp : {perf?.compressor_power_kw ?? "--"} kW
+            </div>
+          </div>
+
+          {points.map((pt) => (
+            <div key={pt.name} style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "8px", padding: "12px" }}>
+              <div style={{ fontSize: "12px", color: "#ce701a", fontWeight: 700 }}>{pt.name}</div>
+              <div style={{ fontSize: "18px", fontWeight: 700, color: "#e6f7ff", marginTop: "4px" }}>
+                {pt.t_c} °C
+              </div>
+              <div style={{ fontSize: "13px", color: "#9ec2d4", marginTop: "2px" }}>
+                {pt.p_bar} bar
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(460px, 1fr))", gap: "18px" }}>
+          <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "10px", padding: "16px" }}>
+            <h2 style={{ marginTop: 0, color: "#28ebff", fontSize: "18px" }}>GET /simulation/state</h2>
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "13px", lineHeight: 1.45 }}>
+              {JSON.stringify(stateData, null, 2)}
+            </pre>
+          </div>
+
+          <div style={{ background: "#06212e", border: "1px solid #11606b", borderRadius: "10px", padding: "16px" }}>
+            <h2 style={{ marginTop: 0, color: "#ce701a", fontSize: "18px" }}>GET /simulation/diagnosis</h2>
+            <div style={{ marginBottom: "10px", fontWeight: 700, color: status === "CRITICAL" ? "#ff6b6b" : status === "DEGRADED" ? "#ffb84d" : "#4ce89b" }}>
+              Score : {score} &nbsp; Statut : {status}
+            </div>
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "13px", lineHeight: 1.45 }}>
+              {JSON.stringify(diagData, null, 2)}
+            </pre>
+          </div>
         </div>
       </div>
     </div>
